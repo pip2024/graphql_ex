@@ -4,7 +4,7 @@ input AddBookInput {
   authorId: ID!
 }
 
-union AddBookResult = Book | AuthorNotFoundError
+union AddBookResult = Book | AuthorNotFoundError | InvalidInputError
 
 type Author {
   id: ID!
@@ -26,6 +26,10 @@ type Book {
 
   """The author who wrote this book."""
   author: Author!
+}
+
+type InvalidInputError {
+  message: String!
 }
 
 type Mutation {
