@@ -1,0 +1,48 @@
+input AddBookInput {
+  title: String!
+  publishedYear: Int!
+  authorId: ID!
+}
+
+union AddBookResult = Book | AuthorNotFoundError
+
+type Author {
+  id: ID!
+  name: String!
+  country: String!
+
+  """Books written by this author."""
+  books: [Book!]!
+}
+
+type AuthorNotFoundError {
+  message: String!
+}
+
+type Book {
+  id: ID!
+  title: String!
+  publishedYear: Int!
+
+  """The author who wrote this book."""
+  author: Author!
+}
+
+type Mutation {
+  """Add a new book to the catalog."""
+  addBook(input: AddBookInput!): AddBookResult!
+}
+
+type Query {
+  """Every book in the catalog."""
+  books: [Book!]!
+
+  """A single book by id, or null if it doesn't exist."""
+  book(id: ID!): Book
+
+  """Every author."""
+  authors: [Author!]!
+
+  """A single author by id, or null if they don't exist."""
+  author(id: ID!): Author
+}

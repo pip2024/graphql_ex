@@ -1,0 +1,30 @@
+[project]
+name = "graphql-ex"
+version = "0.1.0"
+description = "A minimal Strawberry GraphQL + FastAPI example project"
+requires-python = ">=3.11"
+dependencies = [
+    "strawberry-graphql[fastapi,cli]>=0.240.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.6.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
