@@ -28,6 +28,20 @@ never touches storage directly — it goes through `info.context.store`.
 This is what lets you swap the in-memory store for a real database, or
 swap Strawberry for a different library, without a rewrite.
 
+## Avoiding N+1 with a DataLoader
+
+Querying `{ books { author { name } } }` resolves `Book.author` once
+per book returned. Calling the store directly there means one lookup
+per book — fine here, but on a real database that's one query per row
+(the classic GraphQL N+1 problem). `Book.author`
+(`app/schema/types.py`) instead calls `info.context.author_loader.load(...)`,
+a `strawberry.dataloader.DataLoader` (created per-request in
+`app/context.py`) that collects every author id requested during one
+tick of the event loop and fetches them in a single batched call to
+`DataStore.get_authors_by_ids`. This is why the resolver is `async def`
+— `DataLoader.load()` is awaitable, and batching only works across
+concurrently-awaited calls.
+
 ## Running it
 
 This project uses [uv](https://docs.astral.sh/uv/) to manage the

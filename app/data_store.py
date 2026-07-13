@@ -36,6 +36,10 @@ class DataStore:
     def get_author(self, author_id: int) -> Author | None:
         return self._authors.get(author_id)
 
+    def get_authors_by_ids(self, ids: list[int]) -> list[Author | None]:
+        """Batch lookup for DataLoader: result order/length must match `ids`."""
+        return [self._authors.get(author_id) for author_id in ids]
+
     def list_books_by_author(self, author_id: int) -> list[Book]:
         return [book for book in self._books.values() if book.author_id == author_id]
 

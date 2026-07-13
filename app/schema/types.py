@@ -43,8 +43,13 @@ class Book:
     _author_id: strawberry.Private[int]
 
     @strawberry.field(description="The author who wrote this book.")
-    def author(self, info: Info[Context, None]) -> Author:
-        model = info.context.store.get_author(self._author_id)
+    async def author(self, info: Info[Context, None]) -> Author:
+        # Goes through a DataLoader instead of calling the store directly:
+        # if a query resolves many books in one request (e.g.
+        # `books { author { name } }`), every book's author lookup gets
+        # collected into a single batched call instead of one call per
+        # book — the classic GraphQL N+1 problem.
+        model = await info.context.author_loader.load(self._author_id)
         if model is None:
             # Data-integrity invariant, not a client-facing error: every
             # stored book always has a valid author_id.
