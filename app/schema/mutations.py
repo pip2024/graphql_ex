@@ -37,7 +37,7 @@ AddBookResult = Annotated[Book | AuthorNotFoundError, strawberry.union("AddBookR
 @strawberry.type
 class Mutation:
     @strawberry.mutation(description="Add a new book to the catalog.")
-    def add_book(self, info: Info[Context, None], input: AddBookInput) -> AddBookResult:
+    async def add_book(self, info: Info[Context, None], input: AddBookInput) -> AddBookResult:
         store = info.context.store
         if store.get_author(int(input.author_id)) is None:
             return AuthorNotFoundError(message=f"No author with id {input.author_id}")
@@ -47,4 +47,6 @@ class Mutation:
             published_year=input.published_year,
             author_id=int(input.author_id),
         )
+        # Notifies any active `bookAdded` subscribers — see app/schema/subscriptions.py.
+        await info.context.broadcaster.publish(model)
         return Book.from_model(model)

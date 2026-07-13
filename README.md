@@ -11,15 +11,17 @@ a tiny book catalog: `Author` → `Book`.
 app/
   models.py         # plain dataclasses — the domain, no GraphQL awareness
   data_store.py      # in-memory "repository" standing in for a real DB
-  context.py          # per-request context (dependency injection point)
+  broadcaster.py      # in-memory pub/sub backing the bookAdded subscription
+  context.py            # per-request context (dependency injection point)
   schema/
-    types.py          # GraphQL types, each wrapping a domain model
-    queries.py         # Query root
-    mutations.py       # Mutation root
-    schema.py           # combines Query + Mutation into strawberry.Schema
-  main.py               # FastAPI app, mounts the schema at /graphql
-tests/                    # tests execute the schema directly — no HTTP needed
-scripts/export_schema.py   # writes schema.graphql (see "Exporting the schema")
+    types.py              # GraphQL types, each wrapping a domain model
+    queries.py             # Query root
+    mutations.py            # Mutation root
+    subscriptions.py         # Subscription root
+    schema.py                 # combines Query + Mutation + Subscription
+  main.py                      # FastAPI app, mounts the schema at /graphql
+tests/                          # tests execute the schema directly — no HTTP needed
+scripts/export_schema.py         # writes schema.graphql (see "Exporting the schema")
 ```
 
 The core idea worth taking away: **the domain model, the storage
@@ -41,6 +43,38 @@ tick of the event loop and fetches them in a single batched call to
 `DataStore.get_authors_by_ids`. This is why the resolver is `async def`
 — `DataLoader.load()` is awaitable, and batching only works across
 concurrently-awaited calls.
+
+## Subscriptions
+
+The third GraphQL operation type, alongside Query and Mutation: instead
+of one request/response, a client opens a persistent WebSocket
+connection and receives a stream of values over time.
+`Subscription.book_added` (`app/schema/subscriptions.py`) is an async
+generator resolver — it `yield`s a `Book` every time one gets added,
+rather than `return`ing once. It's fed by `app/broadcaster.py`, a
+small in-memory pub/sub (a list of `asyncio.Queue`s); `Mutation.add_book`
+publishes to it right after adding a book. A real, multi-process
+deployment would back this with something shared across processes
+instead — Redis pub/sub, a message queue, a DB change stream — since
+this in-memory version only sees subscribers connected to the same
+process.
+
+`strawberry.fastapi.GraphQLRouter` (already mounted in `app/main.py`)
+registers the WebSocket endpoint automatically at the same `/graphql`
+path — no extra wiring needed. Try it in the GraphiQL UI: open two
+browser tabs at http://127.0.0.1:8000/graphql, run this in the first...
+
+```graphql
+subscription {
+  bookAdded {
+    title
+    publishedYear
+  }
+}
+```
+
+...then run the `addBook` mutation (see below) in the second tab and
+watch the first tab receive the new book immediately.
 
 ## Running it
 
@@ -98,10 +132,10 @@ modeled as a union instead of a raised exception.
 uv run pytest
 ```
 
-Tests call `schema.execute_sync(...)` directly with a GraphQL query
-string — no HTTP server or test client needed, which keeps them fast
-and makes them a good place to learn how a resolver behaves in
-isolation.
+Tests call `schema.execute(...)` (or, for the subscription test,
+`schema.subscribe(...)`) directly with a GraphQL query string — no HTTP
+server or test client needed, which keeps them fast and makes them a
+good place to learn how a resolver behaves in isolation.
 
 ## Coding style / lint
 

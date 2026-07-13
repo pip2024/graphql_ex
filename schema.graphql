@@ -46,3 +46,8 @@ type Query {
   """A single author by id, or null if they don't exist."""
   author(id: ID!): Author
 }
+
+type Subscription {
+  """Fires whenever a new book is added to the catalog."""
+  bookAdded: Book!
+}
