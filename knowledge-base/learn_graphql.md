@@ -358,3 +358,226 @@ To prevent the Python backend team from accidentally deploying a change that bre
 |**Development**|Frontend uses mocks; Backend builds resolvers in Python.|MSW (JS), Strawberry/Ariadne (Python)|
 |**Integration**|Auto-generate types on both sides to prevent manual drift.|GraphQL Code Generator (JS)|
 |**Deployment**|Run breaking-change checks on every Pull Request.|GraphQL Hive, Apollo Studio CLI|
+
+### Caching with GET
+
+To understand how caching works with the `GET` verb in GraphQL, we first have to look at why GraphQL usually struggles with caching.
+
+By default, most GraphQL clients and servers use **HTTP `POST`** requests. Because all queries are sent to a single endpoint (like `/graphql`) inside the request body, traditional network-level caches (like CDNs, proxies, and web browsers) cannot cache the responses. To a CDN, every single request looks exactly the same, even if one is asking for a user profile and another is fetching a product catalog.
+
+Using HTTP `GET` changes the game by bringing back standard HTTP caching. Here is how it works, the challenges it introduces, and how the industry solves them.
+
+### 1. The Basic Approach: Query in the URL
+
+When you configure your GraphQL client to use `GET` instead of `POST`, it serializes your GraphQL query and variables into URL query parameters.
+
+**The Request:**
+
+HTTP
+
+```
+GET /graphql?query=query+GetUserName{user(id:"123"){name}} HTTP/1.1
+Host: api.example.com
+```
+
+Because the entire query is now part of the URL, **the URL acts as a unique cache key**.
+
+Now, standard caching infrastructure can step in:
+
+- **The CDN (Cloudflare, Fastly, etc.)** or **Varnish** sees the unique URL.
+    
+- If the server responds with a `Cache-Control: public, max-age=3600` header, the CDN will cache that exact JSON response.
+    
+- The next time any user requests that exact same URL, the CDN serves it instantly from the edge without ever hitting your database.
+    
+
+### 2. The Big Problem with Raw GET Requests
+
+While sending raw queries over `GET` works for simple applications, it quickly falls apart in production due to **URL length limits**.
+
+Browsers, CDNs, and web servers have strict limits on how long a URL can be (typically around **2KB to 8KB**). A standard GraphQL query with multiple nested fields, fragments, and variables can easily exceed this limit, causing the server to reject the request with a `414 URI Too Long` error.
+
+### 3. The Modern Solution: Automatic Persisted Queries (APQ)
+
+To get the benefits of `GET` caching without hitting URL length limits, the GraphQL community (spearheaded by Apollo) created **Automatic Persisted Queries (APQ)**.
+
+Instead of sending the massive query string, the client sends a **SHA-256 hash** of the query in the `GET` request.
+
+#### How the APQ Workflow Works:
+
+1. **The Client Hash Check (Optimistic GET):**
+    
+    The client calculates the SHA-256 hash of the query and sends a `GET` request with just the hash:
+    
+    HTTP
+    
+    ```
+    GET /graphql?extensions={"persistedQuery":{"version":1,"sha256Hash":"9b74...13a5"}}
+    ```
+    
+2. **The Server Response:**
+    
+    - **Cache Hit (Server knows the hash):** If the server has seen this query before, it looks up the associated query string in its memory, executes it, returns the data, and the CDN caches the response.
+        
+    - **Cache Miss (Server does NOT know the hash):** If the server has never seen this hash, it returns a specific error: `PersistedQueryNotFound`.
+        
+3. **The Client Fallback (The POST Register):**
+    
+    Upon receiving the error, the client sends a `POST` request containing both the hash _and_ the full raw query string. The server executes the query and saves the hash-to-query mapping in its cache (e.g., in Redis).
+    
+4. **Subsequent Requests:**
+    
+    From this point on, the client (and all other clients) can use the short `GET` request with the hash, and it will be fully cacheable by CDNs.
+    
+
+### How to Control the Cache (The Headers)
+
+Once you have your queries running over `GET` (via raw GET or APQ), you control the cache behavior just like you would with a REST API. Your backend resolvers must append standard HTTP cache headers to the response:
+
+- **`Cache-Control: public, max-age=300`**: Tells CDNs and browsers they can cache this specific GraphQL response for 5 minutes.
+    
+- **`Cache-Control: private`**: Tells the network _not_ to cache this at the CDN level (useful for personalized user data, though browsers can still cache it).
+    
+- **`ETag` / `Last-Modified`**: Allows the browser to send a conditional request (`If-None-Match`). If the data hasn't changed, the server responds with a lightweight `304 Not Modified` without re-sending the data payload.
+    
+
+### Summary: GET Caching Pros & Cons
+
+- **PRO:** Incredibly fast response times for global users as data is served directly from CDN edge servers.
+    
+- **PRO:** Reduces database and backend server load drastically.
+    
+- **CON:** Requires setting up a tool like Redis on your server to handle APQ hash registries.
+    
+- **CON:** Harder to configure fine-grained caching (e.g., if one field in your query updates every second, but the rest updates daily, the entire query's cache age must adapt to the fastest-changing field).
+
+### On Authorization and Authentication
+
+Ref: [Security | GraphQL](https://graphql.org/learn/security/
+
+In GraphQL, **authentication** (who you are) and **authorization** (what you are allowed to see) must be decoupled.
+
+A common architectural trap is placing permission checks directly inside your GraphQL resolver functions. This tightly couples your API layout to your security logic, leading to duplicate code, missing guardrails, and security vulnerabilities.
+
+The gold standard for securing a GraphQL API is to **authenticate at the entry point, but authorize inside your business logic layer**.
+
+### 1. Authentication (Who You Are)
+
+**The Rule:** Handle authentication _before_ the GraphQL execution engine ever touches the query.
+
+Whether you are using JWTs (JSON Web Tokens), cookies, or API keys, your HTTP middleware should intercept the incoming request, validate the token, and attach the user data to the **GraphQL Context**.
+
+```
+[Incoming Request] ──> [HTTP Middleware (Validates JWT)] ──> [Attach user to Context] ──> [GraphQL Engine]
+```
+
+#### The Implementation
+
+Your GraphQL resolvers should never contain logic that parses headers or talks to an auth provider. They should simply read the user from the `context` object.
+
+JavaScript
+
+```
+// Example in Node.js / Express
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  // Context is generated once per request
+  context: async ({ req }) => {
+    const token = req.headers.authorization || '';
+    const user = await verifyTokenAndGetUser(token); // Returns null or User object
+    
+    return { user }; // Shared across all resolvers
+  }
+});
+```
+
+### 2. Authorization (What You Can Do)
+
+Once the user is authenticated, you have to verify their permissions. There are three primary patterns for implementing authorization, depending on the scale of your application.
+
+#### Pattern A: The Business Logic Layer (Best Practice)
+
+Instead of putting authorization inside the resolver, your resolver should instantly hand off the request to a dedicated **Service/Domain Layer**.
+
+- **Why it works:** If you decide to add a REST endpoint, a background worker, or a CLI tool later on, they will all call the exact same service layer and inherit the same security rules.
+    
+
+JavaScript
+
+```
+// GOOD: The resolver acts as an aggregate router, security is handled inside the Service
+const resolvers = {
+  Query: {
+    sensitiveData: async (parent, args, context) => {
+      // 1. Pass the user context directly into your business service
+      return await UserService.getSensitiveData(args.id, context.user);
+    }
+  }
+};
+
+// Inside services/UserService.js
+class UserService {
+  static async getSensitiveData(id, currentUser) {
+    // 2. Business logic strictly enforces access controls
+    if (!currentUser) throw new Error("Unauthenticated");
+    if (!currentUser.roles.includes("ADMIN")) throw new Error("Unauthorized");
+    
+    return db.fetch(id);
+  }
+}
+```
+
+#### Pattern B: Schema-Based Directives (Great for Role-Based Access)
+
+If your permission model is strictly role-based (e.g., `Admin`, `Editor`, `User`), you can use custom **GraphQL Directives** to declarative gate fields directly inside your schema.
+
+GraphQL
+
+```
+# Declaratively securing fields in the schema definition
+type User {
+  id: ID!
+  name: String!
+  email: String! @auth(requires: ADMIN) # Hidden from non-admins
+  salary: Float! @auth(requires: MANAGER)
+}
+```
+
+- **How it works:** You write a reusable directive function that wraps the target fields. If a user without the `ADMIN` role tries to query `email`, the directive blocks the resolver from executing and throws an auth error.
+    
+
+#### Pattern C: Component/Library-Based Guardrails (The "Middleware" Approach)
+
+If you prefer to keep your backend models isolated but want a clean middleware layout, you can use a library like `graphql-shield` (Node.js) or write equivalent middleware wrappers. This sits precisely between the GraphQL execution engine and your resolvers.
+
+JavaScript
+
+```
+// Defining a separate, readable permissions map
+const permissions = shield({
+  Query: {
+    adminDashboard: isAdmin,
+  },
+  Mutation: {
+    deletePost: isPostOwner,
+  }
+});
+```
+
+### 3. Crucial Security Pitfalls to Keep in Mind
+
+#### Look out for Partial Errors
+
+Unlike REST where an unauthorized request blocks the entire payload with a `401 Unauthorized` HTTP status, GraphQL can return **partial data**. If a query requests 5 fields and the user is only authorized for 4 of them, the server will return data for the 4 safe fields, a `null` for the unauthorized field, and append an error message to the `errors` array. Ensure your frontend is designed to handle this structure cleanly.
+
+#### Lock Down Introspection in Production
+
+GraphQL has a feature called **Introspection** which allows anyone to query the server for a complete map of all types, fields, and queries available.
+
+- **Best Practice:** Keep introspection turned **ON** in development, but **OFF** in your production environment. If it is left on publicly, attackers can easily map out your entire data structure and hunt for vulnerable fields.
+    
+
+#### Be Mindful of Object-Level Exposure (ID Harvesting)
+
+If a user can guess or cycle through IDs (e.g., querying `user(id: "1001")`, `user(id: "1002")`), your service layer _must_ verify that the requesting user owns that resource or has explicit permission to view it, rather than blindly returning the object from the database.
